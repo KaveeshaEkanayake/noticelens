@@ -1,0 +1,45 @@
+# Notices data (local only)
+notices/
+
+# Environment variables
+.env
+.env.*
+
+# AWS credentials and config
+.aws/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+env/
+
+# Credential and secret files
+*.pem
+*.key
+*.p12
+*.pfx
+credentials
+secrets.json
+secrets.yaml
+secrets.yml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+*.swp
+*.swo
+
+# Logs
+*.log
