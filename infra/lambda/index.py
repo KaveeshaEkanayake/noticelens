@@ -115,13 +115,15 @@ _CURRENCY_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Required documents
-_DOC_RE = re.compile(
-    r"\b(national\s+identity\s+card|NIC|passport|birth\s+certificate|"
+# Required documents — keyword anchors. The regex captures a leading keyword;
+# we then extend rightward to pick up the full noun phrase (up to ~5 words).
+# Grouping happens per source line — one entry per line maximum.
+_DOC_KEYWORD_RE = re.compile(
+    r"\b(national\s+identity\s+card|NIC\b|passport|birth\s+certificate|"
     r"title\s+deed|survey\s+plan|marriage\s+certificate|death\s+certificate|"
     r"medical\s+certificate|fitness\s+certificate|application\s+form|"
     r"photographs?|receipts?|driving\s+licen[cs]e?|permit|"
-    r"bank\s+statement|proof\s+of|statutory\s+declaration|affidavit)\b",
+    r"bank\s+statement|proof\s+of(?:\s+\w+){0,3}|statutory\s+declaration|affidavit)\b",
     re.IGNORECASE,
 )
 
@@ -213,6 +215,14 @@ def respond(status: int, body: Any) -> dict:
         "headers": {**CORS, "Content-Type": "application/json"},
         "body": json.dumps(body),
     }
+
+
+def _word_truncate(text: str, max_chars: int = 160) -> str:
+    """Truncate text to at most max_chars, always on a word boundary."""
+    if len(text) <= max_chars:
+        return text
+    truncated = text[:max_chars].rsplit(" ", 1)[0].rstrip(",;:")
+    return truncated + "…"
 
 
 def _is_header_zone(ln: dict) -> bool:
@@ -537,25 +547,43 @@ def handler(event: dict, context: Any) -> dict:
                 })
 
     # ── 3d: Required documents ────────────────────────────────────────────
+    # Group by source line: collect all keyword matches on a line, then emit
+    # one document entry per line using the longest / most descriptive match
+    # found on that line (avoids "NIC", "National Identity Card", "Passport"
+    # appearing as three separate entries from the same line).
     documents: list[dict] = []
-    seen_docs: set[str] = set()
+    seen_line_texts: set[str] = set()   # one entry per unique source line
+
     for ln in lines:
-        for m in _DOC_RE.finditer(ln["text"]):
-            key = m.group(0).lower()
-            if key not in seen_docs:
-                seen_docs.add(key)
-                documents.append({
-                    "value":       m.group(0),
-                    "source_line": ln,
-                    "confidence":  "low" if ln["low_ocr_confidence"] else "high",
-                })
+        matches = list(_DOC_KEYWORD_RE.finditer(ln["text"]))
+        if not matches:
+            continue
+        line_key = ln["text"]
+        if line_key in seen_line_texts:
+            continue
+        seen_line_texts.add(line_key)
+
+        # Pick the longest match on this line as the representative label —
+        # it tends to be the most descriptive (e.g. "National Identity Card"
+        # beats "NIC"; "proof of address" beats "proof of").
+        best = max(matches, key=lambda m: len(m.group(0)))
+        value = best.group(0).strip()
+
+        # Normalise: collapse internal whitespace
+        value = re.sub(r"\s+", " ", value)
+
+        documents.append({
+            "value":       value,
+            "source_line": ln,
+            "confidence":  "low" if ln["low_ocr_confidence"] else "high",
+        })
 
     # ── 3e: Action checklist ──────────────────────────────────────────────
     checklist: list[dict] = []
     for ln in lines:
         if _ACTION_RE.search(ln["text"]) and len(ln["text"].split()) > 4:
             checklist.append({
-                "value":       ln["text"][:160],
+                "value":       _word_truncate(ln["text"], 160),
                 "source_line": ln,
                 "confidence":  "low" if ln["low_ocr_confidence"] else
                                "med" if len(ln["text"].split()) < 8 else "high",
@@ -575,6 +603,14 @@ def handler(event: dict, context: Any) -> dict:
             logger.warning("Translate error (non-fatal): %s", e)
 
     # ── Build response ────────────────────────────────────────────────────
+    # Exclude from uncertain_dates anything that was already classified as a
+    # confident deadline — prevents the same date appearing in both sections.
+    deadline_values = {d["value"].lower() for d in deadlines}
+    uncertain_dates = [
+        u for u in uncertain_dates
+        if u["value"].lower() not in deadline_values
+    ]
+
     return respond(200, {
         "lines":           lines,
         "entities":        entities,
