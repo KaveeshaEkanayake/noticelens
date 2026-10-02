@@ -1,0 +1,715 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>NoticeLens</title>
+  <style>
+    /* ── Reset & base ─────────────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:        #f5f5f2;
+      --surface:   #ffffff;
+      --border:    #e2e2de;
+      --text:      #1a1a18;
+      --muted:     #6b6b67;
+      --accent:    #1d5fa8;
+      --accent-lt: #e8f0fb;
+      --warn:      #7a4f00;
+      --warn-bg:   #fff8e6;
+      --warn-bd:   #f5c842;
+      --high:      #fff3c4;   /* source highlight */
+      --high-act:  #ffd84d;
+      --ok:        #1a6b3c;
+      --ok-bg:     #e8f5ee;
+      --radius:    10px;
+      --shadow:    0 1px 4px rgba(0,0,0,.08);
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      font-size: 15px;
+      line-height: 1.6;
+      min-height: 100vh;
+    }
+
+    /* ── Layout ──────────────────────────────────────────────── */
+    header {
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      padding: 14px 24px;
+      display: flex;
+      align-items: baseline;
+      gap: 10px;
+    }
+    header h1 { font-size: 1.25rem; font-weight: 700; letter-spacing: -.02em; }
+    header span { font-size: .85rem; color: var(--muted); }
+
+    .app {
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 24px 16px;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 20px;
+    }
+    @media (max-width: 700px) {
+      .app { grid-template-columns: 1fr; }
+    }
+
+    /* ── Card ────────────────────────────────────────────────── */
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      padding: 20px;
+    }
+    .card-title {
+      font-size: .75rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: .07em;
+      color: var(--muted);
+      margin-bottom: 14px;
+    }
+
+    /* ── Left pane: input ────────────────────────────────────── */
+    .samples {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-bottom: 14px;
+    }
+    .sample-btn {
+      font-size: .8rem;
+      padding: 5px 12px;
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      background: var(--bg);
+      color: var(--text);
+      cursor: pointer;
+      transition: background .15s, border-color .15s;
+    }
+    .sample-btn:hover { background: var(--accent-lt); border-color: var(--accent); color: var(--accent); }
+
+    textarea {
+      width: 100%;
+      min-height: 240px;
+      padding: 12px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      font-size: .9rem;
+      font-family: inherit;
+      resize: vertical;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.6;
+      transition: border-color .15s;
+    }
+    textarea:focus { outline: none; border-color: var(--accent); }
+
+    .analyze-btn {
+      margin-top: 12px;
+      width: 100%;
+      padding: 11px;
+      background: var(--accent);
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      font-size: .95rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: opacity .15s;
+    }
+    .analyze-btn:hover { opacity: .88; }
+    .analyze-btn:disabled { opacity: .45; cursor: default; }
+
+    /* ── Source panel ────────────────────────────────────────── */
+    #source-view {
+      font-size: .88rem;
+      line-height: 1.75;
+      white-space: pre-wrap;
+      word-break: break-word;
+      max-height: 480px;
+      overflow-y: auto;
+    }
+    #source-view .src-line { border-radius: 3px; transition: background .2s; }
+    #source-view .src-line.active { background: var(--high-act); }
+    #source-view .src-line.lit    { background: var(--high); }
+
+    /* ── Right pane: results ─────────────────────────────────── */
+    .results-placeholder {
+      color: var(--muted);
+      font-size: .9rem;
+      text-align: center;
+      padding: 40px 0;
+    }
+
+    .result-section { margin-bottom: 20px; }
+    .result-section:last-child { margin-bottom: 0; }
+    .section-label {
+      font-size: .72rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: .08em;
+      color: var(--muted);
+      margin-bottom: 8px;
+    }
+
+    /* Summary */
+    .summary-text {
+      font-size: .95rem;
+      padding: 12px 14px;
+      background: var(--ok-bg);
+      border-left: 3px solid var(--ok);
+      border-radius: 0 6px 6px 0;
+      color: var(--ok);
+    }
+
+    /* Items */
+    .item-list { list-style: none; display: flex; flex-direction: column; gap: 8px; }
+    .item {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 10px 12px;
+      cursor: pointer;
+      transition: border-color .15s, background .15s;
+      position: relative;
+    }
+    .item:hover { border-color: var(--accent); background: var(--accent-lt); }
+    .item.active { border-color: var(--accent); background: var(--accent-lt); }
+    .item-value { font-weight: 600; font-size: .92rem; }
+    .item-context {
+      font-size: .78rem;
+      color: var(--muted);
+      margin-top: 3px;
+      font-style: italic;
+    }
+    .confidence {
+      position: absolute;
+      top: 8px;
+      right: 10px;
+      font-size: .7rem;
+      font-weight: 700;
+      padding: 2px 7px;
+      border-radius: 10px;
+    }
+    .conf-high { background: var(--ok-bg); color: var(--ok); }
+    .conf-med  { background: #fff8e6; color: #7a4f00; }
+    .conf-low  { background: #fde8e8; color: #8b1a1a; }
+
+    /* Checklist */
+    .checklist { list-style: none; display: flex; flex-direction: column; gap: 6px; }
+    .check-item {
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      cursor: pointer;
+      padding: 8px 10px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      transition: border-color .15s, background .15s;
+    }
+    .check-item:hover { border-color: var(--accent); background: var(--accent-lt); }
+    .check-item.active { border-color: var(--accent); background: var(--accent-lt); }
+    .check-icon {
+      width: 18px; height: 18px; min-width: 18px;
+      border: 2px solid var(--border);
+      border-radius: 4px;
+      margin-top: 2px;
+      background: var(--bg);
+    }
+    .check-text { font-size: .88rem; }
+
+    /* Verification warning */
+    .verify-block {
+      background: var(--warn-bg);
+      border: 1px solid var(--warn-bd);
+      border-radius: 8px;
+      padding: 12px 14px;
+    }
+    .verify-block .warn-header {
+      font-size: .78rem;
+      font-weight: 700;
+      color: var(--warn);
+      text-transform: uppercase;
+      letter-spacing: .07em;
+      margin-bottom: 8px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .verify-list { list-style: none; display: flex; flex-direction: column; gap: 6px; }
+    .verify-item {
+      font-size: .85rem;
+      padding: 7px 10px;
+      background: rgba(255,255,255,.7);
+      border-radius: 6px;
+      border: 1px solid var(--warn-bd);
+      cursor: pointer;
+    }
+    .verify-item:hover { background: #fff; }
+    .verify-item.active { background: #fff; }
+    .verify-item .vi-label { font-weight: 600; color: var(--warn); }
+    .verify-item .vi-context { font-size: .75rem; color: var(--muted); margin-top: 2px; font-style: italic; }
+
+    /* Empty section */
+    .empty-section {
+      font-size: .83rem;
+      color: var(--muted);
+      font-style: italic;
+    }
+
+    /* Footer */
+    footer {
+      text-align: center;
+      padding: 24px;
+      font-size: .78rem;
+      color: var(--muted);
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>NoticeLens</h1>
+  <span>Understand official notices — Sinhala &amp; English</span>
+</header>
+
+<main class="app">
+
+  <!-- ── Left: Input ─────────────────────────────────────── -->
+  <div style="display:flex;flex-direction:column;gap:20px;">
+
+    <div class="card">
+      <div class="card-title">Notice Input</div>
+      <div class="samples">
+        <button class="sample-btn" onclick="loadSample(0)">Land Acquisition</button>
+        <button class="sample-btn" onclick="loadSample(1)">Driving Licence</button>
+        <button class="sample-btn" onclick="loadSample(2)">Water Bill</button>
+      </div>
+      <textarea id="notice-input" placeholder="Paste an official notice here…"></textarea>
+      <button class="analyze-btn" id="analyze-btn" onclick="runAnalysis()">Analyse Notice</button>
+    </div>
+
+    <div class="card" id="source-card" style="display:none;">
+      <div class="card-title">Source Text <span style="font-weight:400;text-transform:none;letter-spacing:0;">— click a result to highlight</span></div>
+      <div id="source-view"></div>
+    </div>
+
+  </div>
+
+  <!-- ── Right: Results ──────────────────────────────────── -->
+  <div class="card" id="results-pane">
+    <div class="card-title">Analysis</div>
+    <div class="results-placeholder" id="results-placeholder">
+      Paste a notice and press Analyse to see results.
+    </div>
+    <div id="results-body" style="display:none;"></div>
+  </div>
+
+</main>
+
+<footer>NoticeLens · Analysis is AI-assisted and may contain errors. Always verify with the original issuing authority.</footer>
+
+<script>
+/* ════════════════════════════════════════════════════════════════
+   SAMPLE NOTICES
+   ════════════════════════════════════════════════════════════════ */
+const SAMPLES = [
+  {
+    label: "Land Acquisition",
+    text: `NOTICE OF LAND ACQUISITION
+Ministry of Highways, Sri Lanka
+Reference: MOH/ACQ/2026/0047
+Date of Issue: 15 September 2026
+
+Pursuant to Section 38 of the Land Acquisition Act No. 9 of 1950, notice is hereby given that the land described below is required for a public purpose, namely the construction of the Southern Expressway Extension.
+
+AFFECTED PROPERTY:
+Assessment No. 142/B, Galle Road, Matara. Extent: 0.45 acres (approximately).
+
+DEADLINE FOR OBJECTIONS:
+All affected parties must submit written objections to the District Secretariat, Matara, on or before 30 October 2026. Objections submitted after this date will not be considered.
+
+COMPENSATION:
+Compensation will be assessed in accordance with the Act. Claimants must present the following documents: original title deed, certified survey plan, National Identity Card (NIC), and two passport-size photographs.
+
+A valuation inquiry will be held at the District Secretariat, Matara, on 12 November 2026 at 10:00 AM.
+
+Failure to appear at the inquiry will be deemed acceptance of the assessed compensation.
+
+For further information, contact the Acquiring Officer, Ministry of Highways, on 011-2694571.`
+  },
+  {
+    label: "Driving Licence",
+    text: `DEPARTMENT OF MOTOR TRAFFIC
+NOTICE TO DRIVING LICENCE HOLDERS
+Circular No: DMT/2026/09/DL
+
+All holders of driving licences issued prior to 01 January 2020 are required to renew their licences by 31 December 2026. Licences not renewed by this date will be automatically suspended.
+
+RENEWAL FEE:
+The prescribed fee for renewal is LKR 2,500 for a standard licence. An additional late fee of LKR 500 will apply for renewals submitted after 30 November 2026.
+
+REQUIRED DOCUMENTS FOR RENEWAL:
+1. Original current driving licence
+2. Completed application form (DMT-7B), available at all DMT offices
+3. Medical fitness certificate from a registered medical practitioner
+4. National Identity Card or valid passport
+5. Two recent passport-size photographs
+
+Applications must be submitted in person at any regional DMT office. Postal applications will not be accepted.
+
+Office hours: Monday to Friday, 8:30 AM to 4:15 PM.
+For inquiries: 011-2694880 or dmtinfo@motortraffic.gov.lk`
+  },
+  {
+    label: "Water Bill",
+    text: `NATIONAL WATER SUPPLY AND DRAINAGE BOARD
+NOTICE OF REVISED TARIFF AND PAYMENT DEADLINE
+Circular Reference: NWSDB/COM/2026/T-12
+
+With effect from 01 October 2026, the domestic water tariff will be revised as follows:
+- Units 1 to 10 (per month): LKR 18.00 per unit
+- Units 11 to 25: LKR 42.00 per unit
+- Units above 25: LKR 78.00 per unit
+- Fixed monthly meter charge: LKR 200.00
+
+Customers with outstanding balances exceeding LKR 5,000 must settle arrears on or before 15 October 2026 to avoid disconnection.
+
+PAYMENT METHODS:
+Payments can be made at any NWSDB regional office, through internet banking (NWSDB account: 7890123), or at any People's Bank branch. Cash payments at third-party collection centres will not be accepted after 30 September 2026.
+
+Customers wishing to contest their bill must submit a written complaint with supporting documents (meter reading records, previous bills) to the Regional Manager within 14 days of receiving this notice.
+
+NWSDB Hotline: 1954`
+  }
+];
+
+/* ════════════════════════════════════════════════════════════════
+   PATTERN-MATCHING ANALYSER
+   ─────────────────────────────────────────────────────────────
+   SWAP POINT: Replace analyzeNotice() with an async function that
+   calls POST /analyse (AWS Lambda + Bedrock). The returned object
+   must match the AnalysisResult shape below.
+
+   AnalysisResult {
+     summary:   string,
+     deadlines: Item[],
+     fees:      Item[],
+     documents: Item[],
+     checklist: Item[],
+   }
+   Item {
+     value:      string,   // human-readable extracted value
+     sourceText: string,   // verbatim excerpt from original notice
+     lineIndex:  number,   // 0-based line number in original
+     confidence: "high"|"med"|"low"
+   }
+   ════════════════════════════════════════════════════════════════ */
+
+function analyzeNotice(text) {
+  const lines = text.split('\n');
+
+  const deadlines = [];
+  const fees      = [];
+  const documents = [];
+  const checklist = [];
+
+  // ── Regexes ──────────────────────────────────────────────────
+  // Dates: "30 October 2026", "01/10/2026", "2026-10-01"
+  const dateRe = /\b(\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{4}|\d{1,2}\/\d{1,2}\/\d{4}|\d{4}-\d{2}-\d{2})\b/gi;
+  // Deadline context words
+  const deadlineCtxRe = /\b(by|before|on or before|deadline|not later than|must.*by|expires|due|renew|submit.*by|suspended|settlement|arrears)\b/i;
+  // Amounts: LKR 2,500  /  Rs. 500  /  USD 100
+  const amountRe = /\b(LKR|Rs\.?|USD|EUR|GBP)\s*[\d,]+(?:\.\d{1,2})?\b/gi;
+  // Document keywords
+  const docRe = /\b(national identity card|NIC|passport|birth certificate|title deed|survey plan|marriage certificate|death certificate|medical certificate|fitness certificate|application form|photographs?|receipts?|licence|permit|certificate|deed|proof of|bank statement)\b/gi;
+  // Action verbs for checklist
+  const actionRe = /\b(must|required to|shall|should|need to|have to|are to|submit|present|appear|attend|pay|renew|register|provide|bring|carry|complete)\b/i;
+
+  lines.forEach((line, idx) => {
+    const trimmed = line.trim();
+    if (!trimmed) return;
+
+    // ── Deadlines ───────────────────────────────────────────
+    const dateMention = trimmed.match(dateRe);
+    if (dateMention) {
+      const isDeadline = deadlineCtxRe.test(trimmed);
+      dateMention.forEach(dateStr => {
+        deadlines.push({
+          value:      dateStr,
+          sourceText: trimmed,
+          lineIndex:  idx,
+          confidence: isDeadline ? 'high' : 'med'
+        });
+      });
+    }
+
+    // ── Fees ────────────────────────────────────────────────
+    const amounts = [...trimmed.matchAll(amountRe)];
+    amounts.forEach(m => {
+      fees.push({
+        value:      m[0],
+        sourceText: trimmed,
+        lineIndex:  idx,
+        confidence: 'high'
+      });
+    });
+
+    // ── Documents ───────────────────────────────────────────
+    const docs = [...trimmed.matchAll(docRe)];
+    docs.forEach(m => {
+      const already = documents.some(d => d.value.toLowerCase() === m[0].toLowerCase());
+      if (!already) {
+        documents.push({
+          value:      m[0],
+          sourceText: trimmed,
+          lineIndex:  idx,
+          confidence: 'high'
+        });
+      }
+    });
+
+    // ── Checklist ───────────────────────────────────────────
+    if (actionRe.test(trimmed) && trimmed.split(' ').length > 4) {
+      const sentence = trimmed.length > 120 ? trimmed.slice(0, 117) + '…' : trimmed;
+      checklist.push({
+        value:      sentence,
+        sourceText: trimmed,
+        lineIndex:  idx,
+        confidence: trimmed.split(' ').length > 8 ? 'high' : 'med'
+      });
+    }
+  });
+
+  // ── Summary heuristic ────────────────────────────────────────
+  // Find the first substantive sentence (>30 chars, not all caps header)
+  let summaryLine = '';
+  for (const line of lines) {
+    const t = line.trim();
+    if (t.length > 30 && t !== t.toUpperCase() && !/^(ref|date|circular|notice)/i.test(t)) {
+      summaryLine = t.length > 200 ? t.slice(0, 197) + '…' : t;
+      break;
+    }
+  }
+  if (!summaryLine) summaryLine = lines.find(l => l.trim().length > 20)?.trim() ?? 'Could not extract a summary.';
+
+  return {
+    summary:   summaryLine,
+    deadlines: dedupe(deadlines, d => d.value),
+    fees:      dedupe(fees,      f => f.value),
+    documents,
+    checklist: checklist.slice(0, 8) // cap to avoid noise
+  };
+}
+
+function dedupe(arr, key) {
+  const seen = new Set();
+  return arr.filter(item => {
+    const k = key(item).toLowerCase();
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
+}
+
+/* ════════════════════════════════════════════════════════════════
+   UI
+   ════════════════════════════════════════════════════════════════ */
+
+let currentLines   = [];
+let activeLineIdx  = null;
+
+function loadSample(idx) {
+  document.getElementById('notice-input').value = SAMPLES[idx].text;
+}
+
+function runAnalysis() {
+  const raw = document.getElementById('notice-input').value.trim();
+  if (!raw) return;
+
+  const btn = document.getElementById('analyze-btn');
+  btn.disabled = true;
+  btn.textContent = 'Analysing…';
+
+  // Small timeout so the button state renders before synchronous work
+  setTimeout(() => {
+    try {
+      const result = analyzeNotice(raw);
+      renderSource(raw);
+      renderResults(result);
+    } finally {
+      btn.disabled  = false;
+      btn.textContent = 'Analyse Notice';
+    }
+  }, 30);
+}
+
+/* ── Source view ─────────────────────────────────────────────── */
+function renderSource(text) {
+  currentLines = text.split('\n');
+  activeLineIdx = null;
+
+  const view = document.getElementById('source-view');
+  view.innerHTML = currentLines.map((line, i) => {
+    const safe = escHtml(line) || '&nbsp;';
+    return `<div class="src-line" id="line-${i}" data-idx="${i}">${safe}</div>`;
+  }).join('');
+
+  document.getElementById('source-card').style.display = '';
+}
+
+function highlightLine(lineIndex) {
+  // Clear previous
+  document.querySelectorAll('.src-line').forEach(el => el.classList.remove('active', 'lit'));
+
+  if (lineIndex == null) return;
+
+  // Active line
+  const el = document.getElementById(`line-${lineIndex}`);
+  if (!el) return;
+  el.classList.add('active');
+  el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+
+  // Lightly tint adjacent context
+  [-1, 1].forEach(offset => {
+    const neighbor = document.getElementById(`line-${lineIndex + offset}`);
+    if (neighbor) neighbor.classList.add('lit');
+  });
+
+  activeLineIdx = lineIndex;
+
+  // Also clear active state on all items
+  document.querySelectorAll('.item, .check-item, .verify-item').forEach(el => el.classList.remove('active'));
+}
+
+/* ── Results ─────────────────────────────────────────────────── */
+function renderResults(result) {
+  document.getElementById('results-placeholder').style.display = 'none';
+  const body = document.getElementById('results-body');
+  body.style.display = '';
+  body.innerHTML = '';
+
+  // ── Summary ───────────────────────────────────────────────
+  body.appendChild(section('Summary',
+    `<div class="summary-text">${escHtml(result.summary)}</div>`
+  ));
+
+  // ── Separate high/med from low-confidence items ───────────
+  const verified   = { deadlines: [], fees: [], documents: [], checklist: [] };
+  const unverified = { deadlines: [], fees: [], documents: [], checklist: [] };
+
+  ['deadlines','fees','documents','checklist'].forEach(cat => {
+    (result[cat] || []).forEach(item => {
+      (item.confidence === 'low' ? unverified : verified)[cat].push(item);
+    });
+  });
+
+  // ── Deadlines ─────────────────────────────────────────────
+  body.appendChild(section('Deadlines', itemList(verified.deadlines, 'date')));
+
+  // ── Fees ──────────────────────────────────────────────────
+  body.appendChild(section('Fees & Amounts', itemList(verified.fees, 'money')));
+
+  // ── Required Documents ────────────────────────────────────
+  body.appendChild(section('Required Documents', itemList(verified.documents, 'doc')));
+
+  // ── Action Checklist ──────────────────────────────────────
+  body.appendChild(section('Action Checklist', checkList(verified.checklist)));
+
+  // ── Needs Verification ────────────────────────────────────
+  const lowItems = [
+    ...unverified.deadlines,
+    ...unverified.fees,
+    ...unverified.documents,
+    ...unverified.checklist
+  ];
+  if (lowItems.length) {
+    body.appendChild(verifyBlock(lowItems));
+  }
+}
+
+function section(title, contentHTML) {
+  const div = document.createElement('div');
+  div.className = 'result-section';
+  div.innerHTML = `<div class="section-label">${escHtml(title)}</div>${contentHTML}`;
+  return div;
+}
+
+function itemList(items, _type) {
+  if (!items.length) return `<p class="empty-section">None found.</p>`;
+
+  return `<ul class="item-list">${items.map((item, i) =>
+    `<li class="item" onclick="selectItem(this, ${item.lineIndex})" title="Click to highlight source">
+      <div class="item-value">${escHtml(item.value)}</div>
+      <div class="item-context">${escHtml(truncate(item.sourceText, 90))}</div>
+      <span class="confidence conf-${item.confidence}">${confLabel(item.confidence)}</span>
+    </li>`
+  ).join('')}</ul>`;
+}
+
+function checkList(items) {
+  if (!items.length) return `<p class="empty-section">None found.</p>`;
+
+  return `<ul class="checklist">${items.map(item =>
+    `<li class="check-item" onclick="selectItem(this, ${item.lineIndex})" title="Click to highlight source">
+      <div class="check-icon"></div>
+      <span class="check-text">${escHtml(item.value)}</span>
+    </li>`
+  ).join('')}</ul>`;
+}
+
+function verifyBlock(items) {
+  const div = document.createElement('div');
+  div.className = 'result-section';
+  div.innerHTML = `
+    <div class="verify-block">
+      <div class="warn-header">
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M8 1L15 14H1L8 1Z" stroke="#7a4f00" stroke-width="1.5" fill="none"/>
+          <line x1="8" y1="6" x2="8" y2="10" stroke="#7a4f00" stroke-width="1.5"/>
+          <circle cx="8" cy="12" r=".8" fill="#7a4f00"/>
+        </svg>
+        Needs verification — not stated as fact
+      </div>
+      <ul class="verify-list">${items.map(item =>
+        `<li class="verify-item" onclick="selectItem(this, ${item.lineIndex})">
+          <div class="vi-label">${escHtml(item.value)}</div>
+          <div class="vi-context">${escHtml(truncate(item.sourceText, 90))}</div>
+        </li>`
+      ).join('')}</ul>
+    </div>`;
+  return div;
+}
+
+/* ── Interaction ─────────────────────────────────────────────── */
+function selectItem(el, lineIndex) {
+  document.querySelectorAll('.item, .check-item, .verify-item').forEach(e => e.classList.remove('active'));
+  el.classList.add('active');
+  highlightLine(lineIndex);
+
+  // On mobile: scroll source into view
+  if (window.innerWidth <= 700) {
+    document.getElementById('source-card').scrollIntoView({ behavior: 'smooth' });
+  }
+}
+
+/* ── Helpers ─────────────────────────────────────────────────── */
+function escHtml(str) {
+  return (str ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+function truncate(str, max) {
+  return str.length > max ? str.slice(0, max - 1) + '…' : str;
+}
+function confLabel(c) {
+  return c === 'high' ? 'Verified' : c === 'med' ? 'Likely' : 'Uncertain';
+}
+</script>
+</body>
+</html>

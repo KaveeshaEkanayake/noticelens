@@ -11,6 +11,7 @@ import logging
 import re
 from datetime import date, timedelta
 from typing import Any
+from concurrent.futures import ThreadPoolExecutor
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -518,6 +519,7 @@ def handler(event: dict, context: Any) -> dict:
                 "source_line":    ln,
                 "confidence":     "med",
                 "inferred":       True,
+                "_rel_days":      days,
                 "inferred_note":  (
                     f"Computed from document date {doc_date.strftime('%d %B %Y')} + {days} days"
                     if (days is not None and doc_date) else
@@ -525,15 +527,36 @@ def handler(event: dict, context: Any) -> dict:
                 ),
             })
 
-    # Deduplicate deadlines by (normalised value, source line text)
-    seen_dl: set[tuple] = set()
-    deduped_deadlines: list[dict] = []
+    # Deduplicate deadlines by MEANING, not by source line.
+    #
+    # A notice usually restates the same deadline several times (subject line,
+    # body, consequence clause). Keying on the source line kept all of them,
+    # so "within 14 days" appeared three times. Relative deadlines are keyed
+    # on the computed interval, absolute ones on the date itself. Where a
+    # deadline repeats, keep the occurrence with the most informative source
+    # line, which is the longest one.
+    def _dl_key(d: dict) -> tuple:
+        if d.get("inferred") and d.get("_rel_days") is not None:
+            return ("rel", d["_rel_days"])
+        return ("abs", d["value"].lower())
+
+    best_by_key: dict[tuple, dict] = {}
+    order: list[tuple] = []
     for d in deadlines:
-        key = (d["value"].lower(), (d["source_line"]["text"] if d.get("source_line") else ""))
-        if key not in seen_dl:
-            seen_dl.add(key)
-            deduped_deadlines.append(d)
-    deadlines = deduped_deadlines
+        key = _dl_key(d)
+        if key not in best_by_key:
+            best_by_key[key] = d
+            order.append(key)
+        else:
+            prev = best_by_key[key]
+            cur_len  = len(d.get("source_line", {}).get("text", ""))
+            prev_len = len(prev.get("source_line", {}).get("text", ""))
+            if cur_len > prev_len:
+                best_by_key[key] = d
+
+    deadlines = [best_by_key[k] for k in order]
+    for d in deadlines:
+        d.pop("_rel_days", None)
 
     # ── 3c: Fees ──────────────────────────────────────────────────────────
     fees: list[dict] = []
@@ -582,15 +605,74 @@ def handler(event: dict, context: Any) -> dict:
         })
 
     # ── 3e: Action checklist ──────────────────────────────────────────────
+    #
+    # Textract returns one block per VISUAL line, so a sentence that wraps
+    # is split across blocks ("...temporary restriction on your" /
+    # "account until compliance is achieved."). Join forward until the
+    # sentence actually terminates, so checklist items read as whole
+    # instructions. The FIRST line stays as source_line, so the highlight
+    # still anchors to where the instruction begins.
+
+    _SENTENCE_END_RE = re.compile(r"[.!?:]['\"\u201d\u2019)]?\s*$")
+    # A line that starts a new list item / numbered step is never a continuation
+    _NEW_ITEM_RE = re.compile(r"^\s*(?:\d+[.)]|[-\u2022\u2013\u2014*])\s+")
+
+    def _join_continuations(idx: int, max_lines: int = 3, max_words: int = 60) -> str:
+        """Join lines[idx] with following lines until the sentence ends."""
+        text = lines[idx]["text"].strip()
+        j = idx + 1
+        joined = 0
+        while (
+            joined < max_lines
+            and j < len(lines)
+            and not _SENTENCE_END_RE.search(text)
+            and len(text.split()) < max_words
+        ):
+            nxt = lines[j]["text"].strip()
+            if not nxt or _NEW_ITEM_RE.match(nxt):
+                break
+            # A continuation sits below its predecessor, not far away
+            if lines[j]["bbox"]["top"] < lines[idx]["bbox"]["top"]:
+                break
+            text = f"{text} {nxt}"
+            j += 1
+            joined += 1
+        return text
+
     checklist: list[dict] = []
-    for ln in lines:
+    for i, ln in enumerate(lines):
         if _ACTION_RE.search(ln["text"]) and len(ln["text"].split()) > 4:
+            full = _join_continuations(i)
+            # A clause ending in a colon introduces a list; it is a lead-in,
+            # not an instruction the reader can act on.
+            if full.rstrip().endswith(":"):
+                continue
             checklist.append({
-                "value":       _word_truncate(ln["text"], 160),
+                "value":       _word_truncate(full, 200),
                 "source_line": ln,
                 "confidence":  "low" if ln["low_ocr_confidence"] else
                                "med" if len(ln["text"].split()) < 8 else "high",
             })
+
+    # Deduplicate overlapping checklist items.
+    # Joining continuation lines means a longer item can fully contain a
+    # shorter one that was matched from a later line. Keep the longest
+    # version of any instruction and drop anything contained within it.
+    def _norm(t: str) -> str:
+        return re.sub(r"[^a-z0-9 ]", "", t.lower())
+
+    checklist.sort(key=lambda c: len(c["value"]), reverse=True)
+    kept: list[dict] = []
+    for c in checklist:
+        n = _norm(c["value"])
+        if not n:
+            continue
+        if any(n in _norm(k["value"]) for k in kept):
+            continue
+        kept.append(c)
+    # Restore reading order (top of page first)
+    kept.sort(key=lambda c: c["source_line"]["bbox"]["top"])
+    checklist = kept
 
     sinhala_summary: str | None = None  # set inside translate block if enabled
 
@@ -613,7 +695,6 @@ def handler(event: dict, context: Any) -> dict:
     # Translate limit: 10,000 UTF-8 bytes per call. We keep one call by
     # capping each string and the overall batch.
 
-    SENTINEL = " ||NL|| "  # unlikely to appear in natural text; Translate ignores it
 
     translations: dict[int, str] = {}   # index → translated string
 
@@ -645,37 +726,34 @@ def handler(event: dict, context: Any) -> dict:
         for c in checklist[:10]:
             to_translate.append(_word_truncate(c["value"], 200))
 
-        # Batch into ≤9 500-byte chunks (well under the 10 000-byte API limit)
-        CHUNK_BYTES = 9000
+        # Translate each string on its own.
+        #
+        # An earlier version joined every string with a "||NL||" sentinel and
+        # split the response. Amazon Translate does not reliably preserve such
+        # a marker, so the split drifted: the sentinel leaked into visible text
+        # and translations landed on the wrong items. One call per string
+        # removes that whole class of bug; the calls run in parallel so the
+        # added latency is small.
 
-        def _split_chunks(strings: list[str], sep: str, limit: int) -> list[str]:
-            chunks, current, cur_size = [], [], 0
-            for s in strings:
-                seg = s + sep
-                if cur_size + len(seg.encode()) > limit and current:
-                    chunks.append(sep.join(current))
-                    current, cur_size = [], 0
-                current.append(s)
-                cur_size += len(seg.encode())
-            if current:
-                chunks.append(sep.join(current))
-            return chunks
-
-        chunks = _split_chunks(to_translate, SENTINEL, CHUNK_BYTES)
-
-        translated_flat: list[str] = []
-        for chunk in chunks:
+        def _translate_one(idx_text: tuple[int, str]) -> tuple[int, str]:
+            idx, text = idx_text
+            if not text.strip():
+                return idx, ""
             try:
-                tr_resp = translate.translate_text(
-                    Text=chunk,
+                r = translate.translate_text(
+                    Text=text[:9000],
                     SourceLanguageCode="en",
                     TargetLanguageCode="si",
                 )
-                translated_flat.extend(tr_resp["TranslatedText"].split(SENTINEL))
-            except Exception as e:
-                logger.warning("Translate chunk error (non-fatal): %s", e)
-                # Fall back: fill with empty strings so indices still align
-                translated_flat.extend([""] * len(chunk.split(SENTINEL)))
+                return idx, r["TranslatedText"].strip()
+            except Exception as e:                      # noqa: BLE001
+                logger.warning("Translate error for index %s (non-fatal): %s", idx, e)
+                return idx, ""
+
+        translated_flat: list[str] = [""] * len(to_translate)
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            for idx, text in pool.map(_translate_one, list(enumerate(to_translate))):
+                translated_flat[idx] = text
 
         # Assign back by index
         for i, t in enumerate(translated_flat):

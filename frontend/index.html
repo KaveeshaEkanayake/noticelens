@@ -688,7 +688,9 @@ function deadlineList(items) {
     const inferredBadge = item.inferred
       ? `<span class="inferred-badge" title="${esc(item.inferred_note || '')}">Inferred</span>`
       : '';
-    return `<li class="item" onclick="selectItem(this, ${JSON.stringify(src?.bbox ?? null)})" title="Click to highlight in document">
+    return `<li class="item"
+        data-bbox='${JSON.stringify(src?.bbox ?? null)}'
+        onclick="selectItem(this)" title="Click to highlight in document">
       <div class="item-value">${valueHtml(item)}${inferredBadge}</div>
       <div class="item-context">${esc(trunc(src?.text ?? '', 90))}</div>
       <span class="confidence conf-${item.confidence}">${confLabel(item.confidence)}</span>
@@ -700,7 +702,9 @@ function itemList(items) {
   if (!items.length) return `<p class="empty-section">None found.</p>`;
   return `<ul class="item-list">${items.map(item => {
     const src = item.source_line;
-    return `<li class="item" onclick="selectItem(this, ${JSON.stringify(src?.bbox ?? null)})" title="Click to highlight in document">
+    return `<li class="item"
+        data-bbox='${JSON.stringify(src?.bbox ?? null)}'
+        onclick="selectItem(this)" title="Click to highlight in document">
       <div class="item-value">${valueHtml(item)}</div>
       <div class="item-context">${esc(trunc(src?.text ?? '', 90))}</div>
       <span class="confidence conf-${item.confidence}">${confLabel(item.confidence)}</span>
@@ -738,7 +742,9 @@ function verifyBlock(items) {
       </div>
       <ul class="verify-list">${items.map(item => {
         const src = item.source_line;
-        return `<li class="verify-item" onclick="selectItem(this, ${JSON.stringify(src?.bbox ?? null)})">
+        return `<li class="verify-item"
+            data-bbox='${JSON.stringify(src?.bbox ?? null)}'
+            onclick="selectItem(this)" title="Click to highlight in document">
           <div class="vi-label">${esc(item.value)}</div>
           <div class="vi-context">${esc(trunc(src?.text ?? '', 90))}</div>
         </li>`;
@@ -749,14 +755,30 @@ function verifyBlock(items) {
 
 function toggleCheck(el) {
   // Toggle checked state
-  const checked = el.dataset.checked === 'true';
-  el.dataset.checked = checked ? 'false' : 'true';
-  // Also highlight the region
+  const wasChecked = el.dataset.checked === 'true';
+  el.dataset.checked = wasChecked ? 'false' : 'true';
+
+  if (wasChecked) {
+    // Just unticked — clear the highlight and the active state
+    el.classList.remove('active');
+    clearCanvas();
+    return;
+  }
+
+  // Newly ticked — highlight its region
   const bbox = el.dataset.bbox ? JSON.parse(el.dataset.bbox) : null;
   selectItem(el, bbox);
 }
 
 function selectItem(el, bbox) {
+  // Callers that pass only the element carry their bbox in data-bbox.
+  if (bbox === undefined) {
+    const raw = el.dataset ? el.dataset.bbox : null;
+    bbox = null;
+    if (raw && raw !== 'null') {
+      try { bbox = JSON.parse(raw); } catch (e) { bbox = null; }
+    }
+  }
   document.querySelectorAll('.item,.verify-item').forEach(e => e.classList.remove('active'));
   // check-items keep their checked state; just mark active for highlight styling
   document.querySelectorAll('.check-item').forEach(e => e.classList.remove('active'));
