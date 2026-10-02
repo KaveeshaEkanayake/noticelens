@@ -449,19 +449,22 @@ def handler(event: dict, context: Any) -> dict:
             uncertain_dates.append(item)
 
     # Also scan raw text for dates not picked up by Comprehend
+    # Build a set of (value, line_text) already captured to deduplicate
+    captured = {
+        (d["value"].lower(), d["source_line"]["text"] if d.get("source_line") else "")
+        for d in deadlines + uncertain_dates
+    }
     for ln in lines:
         if _is_header_zone(ln):
             continue
         for m in _DATE_RE.finditer(ln["text"]):
             date_text = m.group(0)
-            # Skip if already covered by a Comprehend entity on this line
-            already = any(
-                d["value"].lower() == date_text.lower()
-                and d.get("source_line") is not None
-                and d["source_line"]["text"] == ln["text"]
-                for d in deadlines + uncertain_dates
-            )
-            if already:
+            # Skip academic-year patterns like "2026/27" or "2025/26"
+            if re.match(r"^\d{4}/\d{2}$", date_text):
+                continue
+            # Skip if already captured from Comprehend for this line
+            key = (date_text.lower(), ln["text"])
+            if key in captured:
                 continue
             classification = _classify_date(date_text, ln, doc_date, today)
             if classification == "deadline":
@@ -509,15 +512,29 @@ def handler(event: dict, context: Any) -> dict:
                 ),
             })
 
+    # Deduplicate deadlines by (normalised value, source line text)
+    seen_dl: set[tuple] = set()
+    deduped_deadlines: list[dict] = []
+    for d in deadlines:
+        key = (d["value"].lower(), (d["source_line"]["text"] if d.get("source_line") else ""))
+        if key not in seen_dl:
+            seen_dl.add(key)
+            deduped_deadlines.append(d)
+    deadlines = deduped_deadlines
+
     # ── 3c: Fees ──────────────────────────────────────────────────────────
     fees: list[dict] = []
+    seen_fees: set[str] = set()
     for ln in lines:
         for m in _CURRENCY_RE.finditer(ln["text"]):
-            fees.append({
-                "value":       m.group(0),
-                "source_line": ln,
-                "confidence":  "low" if ln["low_ocr_confidence"] else "high",
-            })
+            key = m.group(0).lower()
+            if key not in seen_fees:
+                seen_fees.add(key)
+                fees.append({
+                    "value":       m.group(0),
+                    "source_line": ln,
+                    "confidence":  "low" if ln["low_ocr_confidence"] else "high",
+                })
 
     # ── 3d: Required documents ────────────────────────────────────────────
     documents: list[dict] = []

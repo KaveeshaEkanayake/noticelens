@@ -67,8 +67,36 @@
       color: var(--muted); margin-bottom: 14px;
     }
 
-    /* ── Upload area ───────────────────────────────── */
-    .upload-area {
+    /* ── Sample buttons ────────────────────────────── */
+    .samples-row {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-bottom: 14px;
+      padding-bottom: 14px;
+      border-bottom: 1px solid var(--border);
+    }
+    .samples-label {
+      font-size: .78rem;
+      color: var(--muted);
+      font-weight: 600;
+      white-space: nowrap;
+    }
+    .sample-btn {
+      font-size: .8rem;
+      padding: 5px 13px;
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      background: var(--bg);
+      color: var(--text);
+      cursor: pointer;
+      transition: background .15s, border-color .15s, color .15s;
+    }
+    .sample-btn:hover  { background: var(--accent-lt); border-color: var(--accent); color: var(--accent); }
+    .sample-btn:disabled { opacity: .5; cursor: default; }
+
+    /* ── Upload area ───────────────────────────────── */    .upload-area {
       border: 2px dashed var(--border);
       border-radius: 8px;
       padding: 32px 16px;
@@ -259,6 +287,13 @@
     <div class="card">
       <div class="card-title">Upload Notice</div>
 
+      <div class="samples-row">
+        <span class="samples-label">Try a sample:</span>
+        <button class="sample-btn" onclick="loadSample('samples/sample-1.png','Bank KYC Letter')">Bank KYC Letter</button>
+        <button class="sample-btn" onclick="loadSample('samples/sample-2.png','University Notice')">University Notice</button>
+        <button class="sample-btn" onclick="loadSample('samples/sample-3.png','Utility Bill Notice')">Utility Bill Notice</button>
+      </div>
+
       <div class="upload-area" id="upload-area">
         <input type="file" id="file-input" accept="image/png,image/jpeg,application/pdf" />
         <div class="upload-icon">📄</div>
@@ -319,6 +354,71 @@ const API_URL = window.API_URL || 'https://71xvl8tqp6.execute-api.ap-south-1.ama
 let selectedFile   = null;
 let lastResult     = null;   // last API response
 let activeBbox     = null;   // currently highlighted bbox
+
+/* ════════════════════════════════════════════════════════════════
+   SAMPLE LOADING — fetches the PNG from CloudFront, runs analysis
+   ════════════════════════════════════════════════════════════════ */
+async function loadSample(path, label) {
+  // Disable all sample buttons while loading
+  document.querySelectorAll('.sample-btn').forEach(b => b.disabled = true);
+  showLoading();
+  document.getElementById('results-placeholder').innerHTML =
+    `<span class="spinner"></span>Loading ${label}…`;
+
+  try {
+    const resp = await fetch(path);
+    if (!resp.ok) throw new Error(`Could not load ${path}: ${resp.status}`);
+    const blob = await resp.blob();
+
+    // Show preview
+    const url = URL.createObjectURL(blob);
+    const img = document.getElementById('preview-img');
+    img.src = url;
+    img.onload = () => resizeCanvas();
+    document.getElementById('image-card').style.display = '';
+    clearCanvas();
+
+    // Update file info label
+    document.getElementById('file-info').textContent = `${label}  (sample)`;
+    document.getElementById('file-info').style.display = 'block';
+
+    // Convert to base64 and analyse — same code path as a real upload
+    const b64 = await blobToBase64(blob);
+    const translateFlag = document.getElementById('translate-toggle').checked;
+
+    document.getElementById('results-placeholder').innerHTML =
+      `<span class="spinner"></span>Analysing ${label}…`;
+
+    const apiResp = await fetch(API_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ image: b64, translate: translateFlag }),
+    });
+    const data = await apiResp.json();
+    if (!apiResp.ok) { showError(data.error ?? `Server error ${apiResp.status}`); return; }
+
+    lastResult = data;
+    renderResults(data);
+
+    // Store the blob as selectedFile so re-clicking Analyse still works
+    selectedFile = new File([blob], label + '.png', { type: 'image/png' });
+    document.getElementById('analyze-btn').disabled = false;
+
+  } catch(err) {
+    showError(`Could not load sample: ${err.message}`);
+  } finally {
+    document.querySelectorAll('.sample-btn').forEach(b => b.disabled = false);
+  }
+}
+
+function blobToBase64(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload  = e => resolve(e.target.result.split(',')[1]);
+    reader.onerror = reject;
+    reader.readAsDataURL(blob);
+  });
+}
 
 /* ════════════════════════════════════════════════════════════════
    FILE HANDLING
