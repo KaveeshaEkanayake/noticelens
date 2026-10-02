@@ -34,10 +34,6 @@ Lambda  (Python 3.12 · 512 MB · 30s)
 
 Extraction is deliberately rule-based over entity detection rather than generative. Dates are classified before being called deadlines: a date in the past, or one next to "Gazette", "Act No" or "dated", is a citation, not something you have to act on. Relative deadlines such as "within 14 days" are computed from the document's own date and marked **Inferred**.
 
-### Why not Bedrock
-
-Bedrock was the intended engine. The AWS account's Bedrock quota sat at 0 TPM against a default of 5,000,000 for the entire build window, across every region and model, with three support cases open. Rather than ship nothing, the pipeline was rebuilt on Textract, Comprehend and Translate — which turned out to suit the core idea better, since Textract returns per-line geometry and a bounding box is a stronger claim than a generated citation.
-
 ## Built with an AI coding agent connected to AWS
 
 Kiro, connected through the **Agent Toolkit for AWS** (AWS MCP Server plus AWS skills), using a dedicated `noticelens` CLI profile in `ap-south-1`.
