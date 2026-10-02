@@ -229,6 +229,15 @@
     }
     .empty-section { font-size: .83rem; color: var(--muted); font-style: italic; }
 
+    .inferred-badge {
+      display: inline-block; margin-left: 8px;
+      font-size: .68rem; font-weight: 700;
+      padding: 1px 6px; border-radius: 8px;
+      background: #e8f0fb; color: var(--accent);
+      border: 1px solid #b8d0f5;
+      vertical-align: middle; cursor: help;
+    }
+
     footer {
       text-align: center; padding: 24px;
       font-size: .78rem; color: var(--muted);
@@ -484,16 +493,19 @@ function renderResults(data) {
     }
   }
 
-  body.appendChild(section('Deadlines',         itemList(verified.deadlines)));
+  body.appendChild(section('Deadlines',         deadlineList(verified.deadlines)));
   body.appendChild(section('Fees & Amounts',    itemList(verified.fees)));
   body.appendChild(section('Required Documents',itemList(verified.documents)));
   body.appendChild(section('Action Checklist',  checkList(verified.checklist)));
 
+  // uncertain_dates from backend go straight into needs-verification
+  const uncertainItems = (data.uncertain_dates || []).map(d => ({...d, _label: d.value}));
   const lowItems = [
     ...unverified.deadlines,
     ...unverified.fees,
     ...unverified.documents,
     ...unverified.checklist,
+    ...uncertainItems,
   ];
   if (lowItems.length) body.appendChild(verifyBlock(lowItems));
 }
@@ -503,6 +515,21 @@ function section(title, contentHTML) {
   div.className = 'result-section';
   div.innerHTML = `<div class="section-label">${esc(title)}</div>${contentHTML}`;
   return div;
+}
+
+function deadlineList(items) {
+  if (!items.length) return `<p class="empty-section">None found.</p>`;
+  return `<ul class="item-list">${items.map(item => {
+    const src = item.source_line;
+    const inferredBadge = item.inferred
+      ? `<span class="inferred-badge" title="${esc(item.inferred_note || '')}">Inferred</span>`
+      : '';
+    return `<li class="item" onclick="selectItem(this, ${JSON.stringify(src?.bbox ?? null)})" title="Click to highlight in document">
+      <div class="item-value">${esc(item.value)}${inferredBadge}</div>
+      <div class="item-context">${esc(trunc(src?.text ?? '', 90))}</div>
+      <span class="confidence conf-${item.confidence}">${confLabel(item.confidence)}</span>
+    </li>`;
+  }).join('')}</ul>`;
 }
 
 function itemList(items) {

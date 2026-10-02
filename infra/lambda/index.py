@@ -9,6 +9,7 @@ import base64
 import boto3
 import logging
 import re
+from datetime import date, timedelta
 from typing import Any
 
 logger = logging.getLogger()
@@ -21,21 +22,190 @@ translate  = boto3.client("translate")
 # ---------------------------------------------------------------------------
 # Confidence thresholds
 # ---------------------------------------------------------------------------
-TEXTRACT_CONFIDENCE_THRESHOLD  = 80.0   # below this → low confidence word
-COMPREHEND_CONFIDENCE_THRESHOLD = 0.85  # below this → needs verification
+TEXTRACT_CONFIDENCE_THRESHOLD  = 80.0
+COMPREHEND_CONFIDENCE_THRESHOLD = 0.85
 
-# 2 MB upload limit (enforced here as a second layer; API GW enforces at edge)
-MAX_BYTES = 2 * 1024 * 1024
+MAX_BYTES = 2 * 1024 * 1024   # 2 MB
 
-# ---------------------------------------------------------------------------
-# CORS headers — returned on every response
-# ---------------------------------------------------------------------------
+# Lines whose Top bounding-box value is below this are letterhead / header —
+# skip them for summary and deadline extraction.
+HEADER_ZONE_THRESHOLD = 0.15   # top 15% of page height
+
 CORS = {
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Headers": "Content-Type",
     "Access-Control-Allow-Methods": "POST,OPTIONS",
 }
 
+# ---------------------------------------------------------------------------
+# Compiled regexes (module-level for warm Lambda reuse)
+# ---------------------------------------------------------------------------
+
+# Date formats encountered in Sri Lankan government documents
+# e.g. "03.02.2017", "30 October 2026", "2026-10-30", "30/10/2026", "30th October 2026"
+_DATE_RE = re.compile(
+    r"\b(?:"
+    r"\d{1,2}[./\-]\d{1,2}[./\-]\d{4}"                              # 03.02.2017 / 30/10/2026
+    r"|\d{4}[./\-]\d{2}[./\-]\d{2}"                                  # 2026-10-30
+    r"|\d{1,2}(?:st|nd|rd|th)?\s+"                                   # 30th October 2026
+      r"(?:January|February|March|April|May|June|July|August|"
+      r"September|October|November|December)\s+\d{4}"
+    r")\b",
+    re.IGNORECASE,
+)
+
+# Context signals that mark a date as a CITATION (not a deadline)
+_CITATION_CTX_RE = re.compile(
+    r"\b(dated|gazette|act\s+no|order\s+no|no\.\s*\d+\s+of\s+\d{4}|"
+    r"issued\s+on|circular|notification|published|established|enacted|"
+    r"constituted|promulgated|vide|pursuant\s+to|under\s+the|hereinafter)\b",
+    re.IGNORECASE,
+)
+
+# Context signals that mark a date as a DEADLINE
+_DEADLINE_CTX_RE = re.compile(
+    r"\b(by|before|on\s+or\s+before|not\s+later\s+than|no\s+later\s+than|"
+    r"must\s+be\s+submitted|must\s+be\s+received|deadline|due\s+date|"
+    r"expires?|expiry|within\s+\d+|submit\s+by|file\s+by|respond\s+by|"
+    r"appeal\s+within|pay\s+by|renew\s+by)\b",
+    re.IGNORECASE,
+)
+
+# Relative deadline phrases: "within 14 days", "within one month", etc.
+_RELATIVE_DEADLINE_RE = re.compile(
+    r"\bwithin\s+"
+    r"(?P<qty>one|two|three|four|five|six|seven|eight|nine|ten|"
+    r"fourteen|fifteen|thirty|sixty|ninety|\d{1,3})"
+    r"\s+(?P<unit>days?|weeks?|months?|years?)\b",
+    re.IGNORECASE,
+)
+
+# Header / letterhead line patterns (for summary skip)
+_HEADER_LINE_RE = re.compile(
+    r"^("
+    r"ref(?:erence)?[\s:./]|"
+    r"date[\s:./]|"
+    r"circular|"
+    r"no\.\s*\d|"
+    r"ministry|department|commission|authority|board|"
+    r"p\.?\s*o\.?\s*box|"
+    r"tel(?:ephone)?[\s:./]|fax[\s:./]|email[\s:./]|"
+    r"(?:sir|madam|dear\s)|"                       # salutation
+    r"\(constituted|"                              # parenthetical sub-title
+    r"[A-Z0-9/\-]{6,}\s*$"                        # pure reference codes
+    r")",
+    re.IGNORECASE,
+)
+
+# Subject line markers
+_SUBJECT_RE = re.compile(
+    r"^(re\s*:|subject\s*:|sub\s*:|\bsub\b\s*[-–—])",
+    re.IGNORECASE,
+)
+
+# Address / date / ref noise lines (short, often at top)
+_ADDRESS_RE = re.compile(
+    r"^(\d{1,4}[,.]?\s+[A-Z]|p\.?\s*o\.?\s*box|no\.\s*\d)",
+    re.IGNORECASE,
+)
+
+# Currency amounts
+_CURRENCY_RE = re.compile(
+    r"\b(LKR|Rs\.?|USD|EUR)\s*[\d,]+(?:\.\d{1,2})?\b",
+    re.IGNORECASE,
+)
+
+# Required documents
+_DOC_RE = re.compile(
+    r"\b(national\s+identity\s+card|NIC|passport|birth\s+certificate|"
+    r"title\s+deed|survey\s+plan|marriage\s+certificate|death\s+certificate|"
+    r"medical\s+certificate|fitness\s+certificate|application\s+form|"
+    r"photographs?|receipts?|driving\s+licen[cs]e?|permit|"
+    r"bank\s+statement|proof\s+of|statutory\s+declaration|affidavit)\b",
+    re.IGNORECASE,
+)
+
+# Action checklist verbs
+_ACTION_RE = re.compile(
+    r"\b(must|required\s+to|shall|should|need\s+to|have\s+to|are\s+to|"
+    r"submit|present|appear|attend|pay|renew|register|provide|bring|"
+    r"carry|complete|contact|appeal|apply|furnish)\b",
+    re.IGNORECASE,
+)
+
+# ---------------------------------------------------------------------------
+# Date parsing helpers
+# ---------------------------------------------------------------------------
+_MONTH_MAP = {
+    "january": 1, "february": 2, "march": 3, "april": 4,
+    "may": 5, "june": 6, "july": 7, "august": 8,
+    "september": 9, "october": 10, "november": 11, "december": 12,
+}
+_WORD_NUM = {
+    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+    "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+    "fourteen": 14, "fifteen": 15, "thirty": 30,
+    "sixty": 60, "ninety": 90,
+}
+
+
+def _parse_date(text: str) -> date | None:
+    """Try to parse a date string into a date object. Returns None on failure."""
+    text = text.strip()
+
+    # dd.mm.yyyy / dd/mm/yyyy / dd-mm-yyyy
+    m = re.match(r"^(\d{1,2})[./\-](\d{1,2})[./\-](\d{4})$", text)
+    if m:
+        try:
+            return date(int(m.group(3)), int(m.group(2)), int(m.group(1)))
+        except ValueError:
+            pass
+
+    # yyyy-mm-dd
+    m = re.match(r"^(\d{4})[./\-](\d{2})[./\-](\d{2})$", text)
+    if m:
+        try:
+            return date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+        except ValueError:
+            pass
+
+    # "30 October 2026" / "30th October 2026"
+    m = re.match(
+        r"^(\d{1,2})(?:st|nd|rd|th)?\s+"
+        r"(January|February|March|April|May|June|July|August|"
+        r"September|October|November|December)\s+(\d{4})$",
+        text, re.IGNORECASE,
+    )
+    if m:
+        try:
+            return date(int(m.group(3)), _MONTH_MAP[m.group(2).lower()], int(m.group(1)))
+        except ValueError:
+            pass
+
+    return None
+
+
+def _relative_to_days(qty_str: str, unit_str: str) -> int | None:
+    """Convert a relative duration to days. Returns None if unrecognised."""
+    qty_str = qty_str.lower()
+    qty = _WORD_NUM.get(qty_str) or (int(qty_str) if qty_str.isdigit() else None)
+    if qty is None:
+        return None
+    unit = unit_str.lower().rstrip("s")
+    if unit == "day":
+        return qty
+    if unit == "week":
+        return qty * 7
+    if unit == "month":
+        return qty * 30   # approximate
+    if unit == "year":
+        return qty * 365
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 def respond(status: int, body: Any) -> dict:
     return {
@@ -45,8 +215,69 @@ def respond(status: int, body: Any) -> dict:
     }
 
 
+def _is_header_zone(ln: dict) -> bool:
+    """True if the line sits in the top 15% of the page (letterhead zone)."""
+    return ln["bbox"]["top"] < HEADER_ZONE_THRESHOLD
+
+
+def _classify_date(
+    date_text: str,
+    source_line: dict | None,
+    doc_date: date | None,
+    today: date,
+) -> str:
+    """
+    Returns: "deadline" | "citation" | "doc_date" | "uncertain"
+
+    Priority:
+      1. If it looks like a citation context → citation
+      2. If it looks like a deadline context → deadline (only future dates)
+      3. If it's in the header zone → doc_date
+      4. If it's in the past → citation
+      5. Otherwise → uncertain
+    """
+    ctx_text = source_line["text"] if source_line else ""
+
+    if _CITATION_CTX_RE.search(ctx_text):
+        return "citation"
+
+    parsed = _parse_date(date_text)
+
+    if _DEADLINE_CTX_RE.search(ctx_text):
+        if parsed and parsed < today:
+            return "citation"   # deadline context but date is past → likely a cited deadline
+        return "deadline"
+
+    # No strong context signal
+    if source_line and _is_header_zone(source_line):
+        return "doc_date"
+
+    if parsed:
+        return "citation" if parsed < today else "uncertain"
+
+    return "uncertain"
+
+
+def _extract_doc_date(lines: list[dict], today: date) -> date | None:
+    """
+    Try to find the document date — the date in the header/reference block.
+    We look at lines in the top 25% of the page for a parseable date.
+    """
+    for ln in lines:
+        if ln["bbox"]["top"] > 0.25:
+            break
+        for m in _DATE_RE.finditer(ln["text"]):
+            d = _parse_date(m.group(0))
+            if d and d <= today:
+                return d
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Main handler
+# ---------------------------------------------------------------------------
+
 def handler(event: dict, context: Any) -> dict:
-    # Handle CORS preflight
     if event.get("httpMethod") == "OPTIONS":
         return respond(200, {})
 
@@ -73,22 +304,19 @@ def handler(event: dict, context: Any) -> dict:
         return respond(400, {"error": "Field 'image' is not valid base64"})
 
     if len(image_bytes) > MAX_BYTES:
-        return respond(413, {"error": f"File too large. Maximum size is 2 MB."})
+        return respond(413, {"error": "File too large. Maximum size is 2 MB."})
 
     # ── Step 1: Textract ──────────────────────────────────────────────────
     try:
-        textract_resp = textract.detect_document_text(
-            Document={"Bytes": image_bytes}
-        )
-    except textract.exceptions.UnsupportedDocumentException:
-        return respond(422, {"error": "Unsupported document format. Please upload a PNG, JPEG, or single-page PDF."})
+        textract_resp = textract.detect_document_text(Document={"Bytes": image_bytes})
     except Exception as e:
         logger.error("Textract error: %s", e)
-        return respond(502, {"error": f"Textract failed: {str(e)}"})
+        err_str = str(e)
+        if "UnsupportedDocument" in err_str:
+            return respond(422, {"error": "Unsupported format. Upload PNG, JPEG, or single-page PDF."})
+        return respond(502, {"error": f"Textract failed: {err_str}"})
 
     blocks = textract_resp.get("Blocks", [])
-
-    # Collect LINE blocks — each carries text, bounding box, and confidence
     lines: list[dict] = []
     full_text_parts: list[str] = []
 
@@ -97,8 +325,8 @@ def handler(event: dict, context: Any) -> dict:
             conf = block.get("Confidence", 0.0)
             geo  = block.get("Geometry", {}).get("BoundingBox", {})
             lines.append({
-                "text":       block["Text"],
-                "confidence": conf,
+                "text":               block["Text"],
+                "confidence":         conf,
                 "bbox": {
                     "left":   geo.get("Left",   0),
                     "top":    geo.get("Top",    0),
@@ -113,93 +341,189 @@ def handler(event: dict, context: Any) -> dict:
 
     if not full_text.strip():
         return respond(200, {
-            "lines": [],
-            "entities": [],
-            "deadlines": [],
-            "fees": [],
-            "documents": [],
-            "checklist": [],
+            "lines": [], "entities": [], "deadlines": [], "fees": [],
+            "documents": [], "checklist": [],
             "summary": "No text could be extracted from this image.",
             "sinhala": None,
         })
 
-    # ── Step 2: Comprehend entity detection ──────────────────────────────
-    # Comprehend has a 5000 UTF-8 byte limit per call
+    # ── Step 2: Comprehend ────────────────────────────────────────────────
     comprehend_input = full_text[:4900]
     try:
-        comp_resp = comprehend.detect_entities(
-            Text=comprehend_input,
-            LanguageCode="en",
-        )
+        comp_resp = comprehend.detect_entities(Text=comprehend_input, LanguageCode="en")
         raw_entities = comp_resp.get("Entities", [])
     except Exception as e:
         logger.warning("Comprehend error (non-fatal): %s", e)
         raw_entities = []
 
-    # Map entities back to the line they appear in (by text search)
     entities: list[dict] = []
     for ent in raw_entities:
-        score      = ent.get("Score", 0.0)
-        ent_text   = ent["Text"]
-        ent_type   = ent["Type"]
-        low_conf   = score < COMPREHEND_CONFIDENCE_THRESHOLD
-
-        # Find the first line containing this entity text
+        score    = ent.get("Score", 0.0)
+        ent_text = ent["Text"]
+        ent_type = ent["Type"]
         source_line = next(
-            (ln for ln in lines if ent_text.lower() in ln["text"].lower()),
-            None,
+            (ln for ln in lines if ent_text.lower() in ln["text"].lower()), None
         )
-
         entities.append({
-            "text":       ent_text,
-            "type":       ent_type,
-            "score":      round(score, 3),
-            "low_confidence": low_conf,
-            "source_line": source_line,
+            "text":            ent_text,
+            "type":            ent_type,
+            "score":           round(score, 3),
+            "low_confidence":  score < COMPREHEND_CONFIDENCE_THRESHOLD,
+            "source_line":     source_line,
         })
 
-    # ── Step 3: Our own extraction logic ─────────────────────────────────
+    # ── Step 3: Extraction logic ──────────────────────────────────────────
+    today    = date.today()
+    doc_date = _extract_doc_date(lines, today)
 
-    # Deadlines — DATE entities + deadline-context lines
-    deadline_ctx_re = re.compile(
-        r"\b(by|before|on or before|not later than|must.*by|deadline|expires|due date|submit.*by|renewal|arrears)\b",
-        re.IGNORECASE,
-    )
-    deadlines: list[dict] = []
+    # ── 3a: Summary ───────────────────────────────────────────────────────
+    # Strategy:
+    #   1. Prefer the line immediately after a subject heading (Re:/Subject:)
+    #   2. Otherwise: first body line (top > 15%) with ≥60 chars that is not
+    #      a header, address, date, or reference pattern.
+    summary = "No summary could be extracted."
+    body_lines = [ln for ln in lines if not _is_header_zone(ln)]
+
+    # Pass 1: subject heading
+    for i, ln in enumerate(body_lines):
+        if _SUBJECT_RE.match(ln["text"]):
+            # The subject content may be on the same line (after the marker)
+            # or on the next line
+            after_marker = re.sub(
+                r"^(re\s*:|subject\s*:|sub\s*:|\bsub\b\s*[-–—])\s*",
+                "", ln["text"], flags=re.IGNORECASE
+            ).strip()
+            if len(after_marker) >= 20:
+                summary = after_marker
+            elif i + 1 < len(body_lines):
+                summary = body_lines[i + 1]["text"]
+            break
+
+    # Pass 2: first substantive body line
+    if summary == "No summary could be extracted.":
+        for ln in body_lines:
+            t = ln["text"].strip()
+            if (
+                len(t) >= 60
+                and not _HEADER_LINE_RE.match(t)
+                and not _ADDRESS_RE.match(t)
+                and not _DATE_RE.fullmatch(t)
+                and not re.match(r"^[\d/\-. ]+$", t)   # pure numbers/dates
+            ):
+                summary = t
+                break
+
+    # ── 3b: Deadlines ─────────────────────────────────────────────────────
+    deadlines: list[dict]     = []
+    doc_dates_found: list[dict] = []
+    uncertain_dates: list[dict] = []
+
+    # Absolute dates from Comprehend DATE entities
     for ent in entities:
-        if ent["type"] == "DATE":
-            src = ent.get("source_line")
-            is_deadline_ctx = bool(deadline_ctx_re.search(src["text"])) if src else False
+        if ent["type"] != "DATE":
+            continue
+        src = ent.get("source_line")
+        # Skip dates in the header zone (those become doc_dates via _extract_doc_date)
+        if src and _is_header_zone(src):
+            continue
+
+        classification = _classify_date(ent["text"], src, doc_date, today)
+        parsed = _parse_date(ent["text"])
+
+        item = {
+            "value":       ent["text"],
+            "source_line": src,
+            "confidence":  "low" if ent["low_confidence"] else "high",
+            "inferred":    False,
+        }
+
+        if classification == "deadline":
+            deadlines.append(item)
+        elif classification == "doc_date":
+            doc_dates_found.append(item)
+        elif classification == "citation":
+            pass   # silently drop citation dates
+        else:
+            # uncertain → needs verification
+            item["confidence"] = "low"
+            uncertain_dates.append(item)
+
+    # Also scan raw text for dates not picked up by Comprehend
+    for ln in lines:
+        if _is_header_zone(ln):
+            continue
+        for m in _DATE_RE.finditer(ln["text"]):
+            date_text = m.group(0)
+            # Skip if already covered by a Comprehend entity on this line
+            already = any(
+                d["value"].lower() == date_text.lower()
+                and d.get("source_line") is not None
+                and d["source_line"]["text"] == ln["text"]
+                for d in deadlines + uncertain_dates
+            )
+            if already:
+                continue
+            classification = _classify_date(date_text, ln, doc_date, today)
+            if classification == "deadline":
+                deadlines.append({
+                    "value":       date_text,
+                    "source_line": ln,
+                    "confidence":  "low" if ln["low_ocr_confidence"] else "med",
+                    "inferred":    False,
+                })
+            elif classification == "uncertain":
+                uncertain_dates.append({
+                    "value":       date_text,
+                    "source_line": ln,
+                    "confidence":  "low",
+                    "inferred":    False,
+                })
+
+    # Relative deadlines: "within 14 days", "within one month"
+    for ln in lines:
+        for m in _RELATIVE_DEADLINE_RE.finditer(ln["text"]):
+            qty_str  = m.group("qty")
+            unit_str = m.group("unit")
+            days = _relative_to_days(qty_str, unit_str)
+            phrase = m.group(0)
+
+            computed_label: str | None = None
+            if days is not None and doc_date:
+                computed = doc_date + timedelta(days=days)
+                computed_label = computed.strftime("%-d %B %Y") if hasattr(date, 'strftime') else str(computed)
+                # strftime %-d is Linux; fall back gracefully on other platforms
+                try:
+                    computed_label = computed.strftime("%-d %B %Y")
+                except ValueError:
+                    computed_label = computed.strftime("%d %B %Y").lstrip("0")
+
             deadlines.append({
-                "value":       ent["text"],
-                "source_line": src,
-                "confidence":  "high" if (not ent["low_confidence"] and is_deadline_ctx) else
-                               "med"  if not ent["low_confidence"] else "low",
+                "value":          phrase + (f" (approx. {computed_label})" if computed_label else ""),
+                "source_line":    ln,
+                "confidence":     "med",
+                "inferred":       True,
+                "inferred_note":  (
+                    f"Computed from document date {doc_date.strftime('%d %B %Y')} + {days} days"
+                    if (days is not None and doc_date) else
+                    "Could not compute — document date not found"
+                ),
             })
 
-    # Fees — QUANTITY entities that look like currency amounts
-    currency_re = re.compile(r"\b(LKR|Rs\.?|USD|EUR)\s*[\d,]+", re.IGNORECASE)
+    # ── 3c: Fees ──────────────────────────────────────────────────────────
     fees: list[dict] = []
     for ln in lines:
-        for m in currency_re.finditer(ln["text"]):
+        for m in _CURRENCY_RE.finditer(ln["text"]):
             fees.append({
                 "value":       m.group(0),
                 "source_line": ln,
                 "confidence":  "low" if ln["low_ocr_confidence"] else "high",
             })
 
-    # Required documents — keyword matching
-    doc_re = re.compile(
-        r"\b(national identity card|NIC|passport|birth certificate|title deed|survey plan|"
-        r"marriage certificate|death certificate|medical certificate|fitness certificate|"
-        r"application form|photographs?|receipts?|driving licence|permit|certificate|deed|"
-        r"bank statement|proof of)\b",
-        re.IGNORECASE,
-    )
+    # ── 3d: Required documents ────────────────────────────────────────────
     documents: list[dict] = []
     seen_docs: set[str] = set()
     for ln in lines:
-        for m in doc_re.finditer(ln["text"]):
+        for m in _DOC_RE.finditer(ln["text"]):
             key = m.group(0).lower()
             if key not in seen_docs:
                 seen_docs.add(key)
@@ -209,15 +533,10 @@ def handler(event: dict, context: Any) -> dict:
                     "confidence":  "low" if ln["low_ocr_confidence"] else "high",
                 })
 
-    # Action checklist — lines with imperative verbs
-    action_re = re.compile(
-        r"\b(must|required to|shall|should|need to|have to|are to|submit|present|"
-        r"appear|attend|pay|renew|register|provide|bring|carry|complete|contact)\b",
-        re.IGNORECASE,
-    )
+    # ── 3e: Action checklist ──────────────────────────────────────────────
     checklist: list[dict] = []
     for ln in lines:
-        if action_re.search(ln["text"]) and len(ln["text"].split()) > 4:
+        if _ACTION_RE.search(ln["text"]) and len(ln["text"].split()) > 4:
             checklist.append({
                 "value":       ln["text"][:160],
                 "source_line": ln,
@@ -225,16 +544,7 @@ def handler(event: dict, context: Any) -> dict:
                                "med" if len(ln["text"].split()) < 8 else "high",
             })
 
-    # Simple summary: first non-header line with enough words
-    header_re = re.compile(r"^(ref|date|circular|notice|ministry|department|no\.|issued)", re.IGNORECASE)
-    summary = "No summary could be extracted."
-    for ln in lines:
-        words = ln["text"].split()
-        if len(words) >= 8 and not header_re.match(ln["text"]):
-            summary = ln["text"]
-            break
-
-    # ── Step 4: Optional Translate to Sinhala ────────────────────────────
+    # ── Step 4: Optional Translate ────────────────────────────────────────
     sinhala_summary: str | None = None
     if translate_to_sinhala and summary != "No summary could be extracted.":
         try:
@@ -249,12 +559,14 @@ def handler(event: dict, context: Any) -> dict:
 
     # ── Build response ────────────────────────────────────────────────────
     return respond(200, {
-        "lines":     lines,
-        "entities":  entities,
-        "deadlines": deadlines,
-        "fees":      fees,
-        "documents": documents,
-        "checklist": checklist[:10],
-        "summary":   summary,
-        "sinhala":   sinhala_summary,
+        "lines":           lines,
+        "entities":        entities,
+        "deadlines":       deadlines,
+        "uncertain_dates": uncertain_dates,
+        "fees":            fees,
+        "documents":       documents,
+        "checklist":       checklist[:10],
+        "summary":         summary,
+        "doc_date":        str(doc_date) if doc_date else None,
+        "sinhala":         sinhala_summary,
     })
