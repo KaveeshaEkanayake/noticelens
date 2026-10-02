@@ -46,3 +46,36 @@ Chronological record of setup steps, decisions, and blockers for the NoticeLens 
 - Frontend: https://do41dacharqdc.cloudfront.net
 - API: https://71xvl8tqp6.execute-api.ap-south-1.amazonaws.com/prod/analyse
 - CloudFront distribution ID: E3NFSD7E5ALCUP
+
+## Oct 2–3, 2026 — final build session
+
+- **Fixed source highlighting (core feature was broken).** Deadlines, fees, documents
+  and verify rows emitted bounding boxes via `JSON.stringify` inside a double-quoted
+  `onclick` attribute. The JSON's own double quotes closed the attribute early, which
+  produced repeated `Uncaught SyntaxError: Unexpected end of input` and meant those
+  handlers never registered. Moved to single-quoted `data-bbox` attributes and made
+  `selectItem` read the attribute when no bbox argument is passed. Only the checklist
+  had worked, because it alone read the attribute itself.
+- **Fixed translation misalignment.** Strings were joined with a `||NL||` sentinel,
+  sent to Translate in one call, then split on the sentinel. Translate does not preserve
+  such a marker reliably: it leaked into visible Sinhala text and translations landed on
+  the wrong items. Replaced with one call per string, issued in parallel, so each
+  translation is bound to its own index.
+- **Extraction quality:** checklist items now join continuation lines so sentences
+  complete; lead-in clauses ending in a colon are dropped; overlapping checklist entries
+  deduplicated; deadlines deduplicated by meaning (computed interval or date) rather
+  than by source line, which had allowed "within 14 days" to appear three times.
+- **Interface:** rebuilt the visual design around a single rule — amber marks evidence
+  and nothing else, matching the highlight drawn on the document. Public Sans for the
+  interface (a typeface designed for public-sector communication) and Noto Sans Sinhala
+  for Sinhala. Document panel made sticky so evidence stays visible while scrolling
+  findings.
+- **First impression:** the page now runs a sample through the real pipeline on load,
+  so it is never empty, and a four-step guided tour explains the verification flow.
+- Verified before each deploy: inline script extracted and checked with `node --check`,
+  Lambda checked with `ast.parse`.
+
+### Known issues at submission
+- Fee amounts are extracted correctly but not labelled with their table row.
+- Fees are deduplicated by amount, so two different charges of the same value collapse.
+- Document detection relies on a keyword list and will miss unusual document names.

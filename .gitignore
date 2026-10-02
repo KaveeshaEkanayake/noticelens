@@ -45,3 +45,6 @@ Thumbs.db
 *.log
 
 _tmp/
+
+cdk.out/
+node_modules/
