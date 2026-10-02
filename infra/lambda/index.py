@@ -589,21 +589,123 @@ def handler(event: dict, context: Any) -> dict:
                                "med" if len(ln["text"].split()) < 8 else "high",
             })
 
-    # ── Step 4: Optional Translate ────────────────────────────────────────
-    sinhala_summary: str | None = None
-    if translate_to_sinhala and summary != "No summary could be extracted.":
-        try:
-            tr_resp = translate.translate_text(
-                Text=summary[:500],
-                SourceLanguageCode="en",
-                TargetLanguageCode="si",
-            )
-            sinhala_summary = tr_resp["TranslatedText"]
-        except Exception as e:
-            logger.warning("Translate error (non-fatal): %s", e)
+    sinhala_summary: str | None = None  # set inside translate block if enabled
 
-    # ── Build response ────────────────────────────────────────────────────
-    # Exclude from uncertain_dates anything that was already classified as a
+    # ── Step 4: Batch translation to Sinhala ─────────────────────────────
+    #
+    # Strings to translate (translatable_values, indexed):
+    #   [0]               summary
+    #   [1..len(dl)]      deadline values
+    #   [next..+fees]     fee source descriptions (NOT the amount itself —
+    #                     amounts are numbers and must not change)
+    #   [next..+docs]     document names
+    #   [next..+check]    checklist values
+    #
+    # We join with a unique sentinel that Amazon Translate passes through
+    # unchanged, then split on it to recover individual translations.
+    #
+    # We do NOT translate: dates, currency amounts, reference numbers, org
+    # names, or source_line text (evidence must stay verbatim).
+    #
+    # Translate limit: 10,000 UTF-8 bytes per call. We keep one call by
+    # capping each string and the overall batch.
+
+    SENTINEL = " ||NL|| "  # unlikely to appear in natural text; Translate ignores it
+
+    def _fee_label(fee_item: dict) -> str:
+        """
+        Return a short human-readable description for a fee line, stripping
+        the raw currency amount so we don't ask Translate to handle numbers.
+        E.g. "LKR 500 is applicable for late submissions" →
+             "applicable for late submissions"
+        """
+        src = fee_item.get("source_line", {}).get("text", "") or ""
+        # Remove the currency token itself, keep the surrounding context
+        label = _CURRENCY_RE.sub("", src).strip(" ,.;:-–—")
+        # Collapse multiple spaces
+        label = re.sub(r"\s+", " ", label)
+        return _word_truncate(label, 80) if label else fee_item["value"]
+
+    translations: dict[int, str] = {}   # index → translated string
+
+    if translate_to_sinhala:
+        # Build the ordered list of strings
+        to_translate: list[str] = []
+        to_translate.append(summary[:400])                                     # 0
+        dl_start  = len(to_translate)
+        for d in deadlines:
+            to_translate.append(_word_truncate(d["value"], 100))              # skip dates
+        fee_start = len(to_translate)
+        for f in fees:
+            to_translate.append(_fee_label(f))
+        doc_start = len(to_translate)
+        for doc in documents:
+            to_translate.append(_word_truncate(doc["value"], 80))
+        chk_start = len(to_translate)
+        for c in checklist[:10]:
+            to_translate.append(_word_truncate(c["value"], 200))
+
+        # Batch into ≤9 500-byte chunks (well under the 10 000-byte API limit)
+        CHUNK_BYTES = 9000
+
+        def _split_chunks(strings: list[str], sep: str, limit: int) -> list[str]:
+            chunks, current, cur_size = [], [], 0
+            for s in strings:
+                seg = s + sep
+                if cur_size + len(seg.encode()) > limit and current:
+                    chunks.append(sep.join(current))
+                    current, cur_size = [], 0
+                current.append(s)
+                cur_size += len(seg.encode())
+            if current:
+                chunks.append(sep.join(current))
+            return chunks
+
+        chunks = _split_chunks(to_translate, SENTINEL, CHUNK_BYTES)
+
+        translated_flat: list[str] = []
+        for chunk in chunks:
+            try:
+                tr_resp = translate.translate_text(
+                    Text=chunk,
+                    SourceLanguageCode="en",
+                    TargetLanguageCode="si",
+                )
+                translated_flat.extend(tr_resp["TranslatedText"].split(SENTINEL))
+            except Exception as e:
+                logger.warning("Translate chunk error (non-fatal): %s", e)
+                # Fall back: fill with empty strings so indices still align
+                translated_flat.extend([""] * len(chunk.split(SENTINEL)))
+
+        # Assign back by index
+        for i, t in enumerate(translated_flat):
+            if i < len(to_translate):
+                translations[i] = t.strip()
+
+        # Attach .si to each item
+        sinhala_summary = translations.get(0) or None
+
+        for i, d in enumerate(deadlines):
+            si = translations.get(dl_start + i, "")
+            if si:
+                d["si"] = si
+
+        for i, f in enumerate(fees):
+            si = translations.get(fee_start + i, "")
+            if si:
+                f["si"] = si
+
+        for i, doc in enumerate(documents):
+            si = translations.get(doc_start + i, "")
+            if si:
+                doc["si"] = si
+
+        for i, c in enumerate(checklist[:10]):
+            si = translations.get(chk_start + i, "")
+            if si:
+                c["si"] = si
+
+    # ── Build response ────────────────────────────────────────────────────    # Exclude from uncertain_dates anything that was already classified as a
     # confident deadline — prevents the same date appearing in both sections.
     deadline_values = {d["value"].lower() for d in deadlines}
     uncertain_dates = [

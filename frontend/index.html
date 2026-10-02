@@ -195,6 +195,21 @@
       background: var(--accent-lt);
       border-left: 3px solid var(--accent);
       border-radius: 0 6px 6px 0; color: var(--accent);
+      line-height: 1.8;
+    }
+
+    /* Sinhala inline label inside an item */
+    .si-primary {
+      font-size: .95rem;
+      font-weight: 600;
+      line-height: 1.8;
+      display: block;
+    }
+    .en-secondary {
+      font-size: .75rem;
+      color: var(--muted);
+      display: block;
+      margin-top: 1px;
     }
 
     .item-list { list-style: none; display: flex; flex-direction: column; gap: 8px; }
@@ -305,7 +320,7 @@
       <div class="options-row">
         <label class="toggle-label">
           <input type="checkbox" id="translate-toggle" />
-          Translate summary to Sinhala
+          Translate to Sinhala
         </label>
       </div>
 
@@ -617,6 +632,21 @@ function section(title, contentHTML) {
   return div;
 }
 
+/* ── Shared item value renderer ──────────────────────────────
+   When an item carries a .si field (Sinhala translation) and the
+   translate toggle is on, show Sinhala as the primary label and
+   English as a small secondary line underneath.
+   Source evidence text (.source_line) is NEVER translated.
+   ──────────────────────────────────────────────────────────── */
+function valueHtml(item) {
+  const translate = document.getElementById('translate-toggle').checked;
+  if (translate && item.si) {
+    return `<span class="si-primary">${esc(item.si)}</span>`
+         + `<span class="en-secondary">${esc(item.value)}</span>`;
+  }
+  return esc(item.value);
+}
+
 function deadlineList(items) {
   if (!items.length) return `<p class="empty-section">None found.</p>`;
   return `<ul class="item-list">${items.map(item => {
@@ -625,7 +655,7 @@ function deadlineList(items) {
       ? `<span class="inferred-badge" title="${esc(item.inferred_note || '')}">Inferred</span>`
       : '';
     return `<li class="item" onclick="selectItem(this, ${JSON.stringify(src?.bbox ?? null)})" title="Click to highlight in document">
-      <div class="item-value">${esc(item.value)}${inferredBadge}</div>
+      <div class="item-value">${valueHtml(item)}${inferredBadge}</div>
       <div class="item-context">${esc(trunc(src?.text ?? '', 90))}</div>
       <span class="confidence conf-${item.confidence}">${confLabel(item.confidence)}</span>
     </li>`;
@@ -637,7 +667,7 @@ function itemList(items) {
   return `<ul class="item-list">${items.map(item => {
     const src = item.source_line;
     return `<li class="item" onclick="selectItem(this, ${JSON.stringify(src?.bbox ?? null)})" title="Click to highlight in document">
-      <div class="item-value">${esc(item.value)}</div>
+      <div class="item-value">${valueHtml(item)}</div>
       <div class="item-context">${esc(trunc(src?.text ?? '', 90))}</div>
       <span class="confidence conf-${item.confidence}">${confLabel(item.confidence)}</span>
     </li>`;
@@ -650,7 +680,7 @@ function checkList(items) {
     const src = item.source_line;
     return `<li class="check-item" onclick="selectItem(this, ${JSON.stringify(src?.bbox ?? null)})" title="Click to highlight in document">
       <div class="check-icon"></div>
-      <span class="check-text">${esc(item.value)}</span>
+      <span class="check-text">${valueHtml(item)}</span>
     </li>`;
   }).join('')}</ul>`;
 }
