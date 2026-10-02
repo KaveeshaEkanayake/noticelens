@@ -244,6 +244,21 @@
       width: 18px; height: 18px; min-width: 18px;
       border: 2px solid var(--border); border-radius: 4px;
       margin-top: 2px; background: var(--bg);
+      flex-shrink: 0;
+      transition: background .15s, border-color .15s;
+    }
+    .check-item[data-checked="true"] .check-icon {
+      background: var(--ok);
+      border-color: var(--ok);
+      /* Checkmark via background image */
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpolyline points='2,6 5,9 10,3' stroke='white' stroke-width='2' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+      background-size: 12px;
+      background-repeat: no-repeat;
+      background-position: center;
+    }
+    .check-item[data-checked="true"] .check-text {
+      text-decoration: line-through;
+      color: var(--muted);
     }
     .check-text { font-size: .88rem; }
 
@@ -532,14 +547,25 @@ function fileToBase64(file) {
 
 /* ════════════════════════════════════════════════════════════════
    CANVAS — bounding box highlighting
+   ════════════════════════════════════════════════════════════════
+   Textract bounding boxes are 0–1 normalised (fraction of image
+   width/height).  The canvas pixel buffer is always set to the
+   image's naturalWidth × naturalHeight.  CSS scales the canvas
+   element to 100% of its container — the browser handles that.
+   We only ever draw in "natural pixel" space.
    ════════════════════════════════════════════════════════════════ */
 const canvas = document.getElementById('bbox-canvas');
 const ctx    = canvas.getContext('2d');
 
 function resizeCanvas() {
   const img = document.getElementById('preview-img');
-  canvas.width  = img.naturalWidth  || img.offsetWidth;
-  canvas.height = img.naturalHeight || img.offsetHeight;
+  // Set the pixel buffer to the image's intrinsic size
+  const w = img.naturalWidth;
+  const h = img.naturalHeight;
+  if (!w || !h) return;
+  canvas.width  = w;
+  canvas.height = h;
+  // CSS: stretch to fill the container (browser scales it visually)
   canvas.style.width  = '100%';
   canvas.style.height = '100%';
 }
@@ -550,21 +576,29 @@ function clearCanvas() {
 
 function drawBbox(bbox) {
   if (!bbox) return;
+
+  // Ensure canvas is sized — may not have fired if image was already loaded
   const img = document.getElementById('preview-img');
-  const w = img.naturalWidth  || canvas.width;
-  const h = img.naturalHeight || canvas.height;
+  if (!canvas.width || !canvas.height) resizeCanvas();
+  if (!canvas.width || !canvas.height) return;
+
+  const cw = canvas.width;
+  const ch = canvas.height;
+
+  const x  = bbox.left   * cw;
+  const y  = bbox.top    * ch;
+  const bw = bbox.width  * cw;
+  const bh = bbox.height * ch;
 
   clearCanvas();
-  ctx.strokeStyle = '#1d5fa8';
-  ctx.lineWidth   = Math.max(2, w * 0.003);
-  ctx.fillStyle   = 'rgba(29, 95, 168, 0.12)';
 
-  const x = bbox.left   * w;
-  const y = bbox.top    * h;
-  const bw = bbox.width  * w;
-  const bh = bbox.height * h;
-
+  // Fill
+  ctx.fillStyle = 'rgba(255, 200, 0, 0.25)';
   ctx.fillRect(x, y, bw, bh);
+
+  // Border — vivid yellow-orange, 3px minimum
+  ctx.strokeStyle = '#e6a800';
+  ctx.lineWidth   = Math.max(3, cw * 0.003);
   ctx.strokeRect(x, y, bw, bh);
 }
 
@@ -678,7 +712,11 @@ function checkList(items) {
   if (!items.length) return `<p class="empty-section">None found.</p>`;
   return `<ul class="checklist">${items.map(item => {
     const src = item.source_line;
-    return `<li class="check-item" onclick="selectItem(this, ${JSON.stringify(src?.bbox ?? null)})" title="Click to highlight in document">
+    // onclick on the whole row highlights; the checkbox div also toggles checked state
+    return `<li class="check-item"
+        data-checked="false"
+        data-bbox='${JSON.stringify(src?.bbox ?? null)}'
+        onclick="toggleCheck(this)">
       <div class="check-icon"></div>
       <span class="check-text">${valueHtml(item)}</span>
     </li>`;
@@ -709,12 +747,27 @@ function verifyBlock(items) {
   return div;
 }
 
+function toggleCheck(el) {
+  // Toggle checked state
+  const checked = el.dataset.checked === 'true';
+  el.dataset.checked = checked ? 'false' : 'true';
+  // Also highlight the region
+  const bbox = el.dataset.bbox ? JSON.parse(el.dataset.bbox) : null;
+  selectItem(el, bbox);
+}
+
 function selectItem(el, bbox) {
-  document.querySelectorAll('.item,.check-item,.verify-item').forEach(e => e.classList.remove('active'));
+  document.querySelectorAll('.item,.verify-item').forEach(e => e.classList.remove('active'));
+  // check-items keep their checked state; just mark active for highlight styling
+  document.querySelectorAll('.check-item').forEach(e => e.classList.remove('active'));
   el.classList.add('active');
   if (bbox) {
     drawBbox(bbox);
-    document.getElementById('image-card').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    // Scroll image into view
+    const imageCard = document.getElementById('image-card');
+    if (imageCard.style.display !== 'none') {
+      imageCard.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
   }
   if (window.innerWidth <= 720) {
     document.getElementById('image-card').scrollIntoView({ behavior: 'smooth' });

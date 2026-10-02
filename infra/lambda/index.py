@@ -433,6 +433,9 @@ def handler(event: dict, context: Any) -> dict:
         if ent["type"] != "DATE":
             continue
         src = ent.get("source_line")
+        # Skip academic-year patterns (e.g. "2026/27", "2025/26")
+        if re.match(r"^\d{4}/\d{2}$", ent["text"].strip()):
+            continue
         # Skip dates in the header zone (those become doc_dates via _extract_doc_date)
         if src and _is_header_zone(src):
             continue
@@ -612,32 +615,29 @@ def handler(event: dict, context: Any) -> dict:
 
     SENTINEL = " ||NL|| "  # unlikely to appear in natural text; Translate ignores it
 
-    def _fee_label(fee_item: dict) -> str:
-        """
-        Return a short human-readable description for a fee line, stripping
-        the raw currency amount so we don't ask Translate to handle numbers.
-        E.g. "LKR 500 is applicable for late submissions" →
-             "applicable for late submissions"
-        """
-        src = fee_item.get("source_line", {}).get("text", "") or ""
-        # Remove the currency token itself, keep the surrounding context
-        label = _CURRENCY_RE.sub("", src).strip(" ,.;:-–—")
-        # Collapse multiple spaces
-        label = re.sub(r"\s+", " ", label)
-        return _word_truncate(label, 80) if label else fee_item["value"]
-
     translations: dict[int, str] = {}   # index → translated string
 
     if translate_to_sinhala:
-        # Build the ordered list of strings
+        # Build the ordered list of strings.
+        #
+        # WHAT GETS TRANSLATED:
+        #   summary         → full sentence
+        #   deadline values → the phrase (dates pass through Translate unchanged)
+        #   fees            → NOT translated; amounts are kept as-is
+        #   document names  → the label value (e.g. "National Identity Card")
+        #   checklist items → the action sentence
+        #
+        # WHAT DOES NOT:
+        #   fee values (currency amounts — never sent to Translate)
+        #   source_line text (verbatim evidence — never touched)
+        #   reference/account numbers (Translate preserves these naturally)
+
         to_translate: list[str] = []
-        to_translate.append(summary[:400])                                     # 0
+        to_translate.append(summary[:400])                          # 0: summary
         dl_start  = len(to_translate)
         for d in deadlines:
-            to_translate.append(_word_truncate(d["value"], 100))              # skip dates
-        fee_start = len(to_translate)
-        for f in fees:
-            to_translate.append(_fee_label(f))
+            to_translate.append(_word_truncate(d["value"], 100))
+        # fees: skip — amounts are opaque; no si field for fees
         doc_start = len(to_translate)
         for doc in documents:
             to_translate.append(_word_truncate(doc["value"], 80))
@@ -690,10 +690,7 @@ def handler(event: dict, context: Any) -> dict:
             if si:
                 d["si"] = si
 
-        for i, f in enumerate(fees):
-            si = translations.get(fee_start + i, "")
-            if si:
-                f["si"] = si
+        # fees: no .si — amounts are kept exactly as extracted
 
         for i, doc in enumerate(documents):
             si = translations.get(doc_start + i, "")
@@ -705,13 +702,18 @@ def handler(event: dict, context: Any) -> dict:
             if si:
                 c["si"] = si
 
-    # ── Build response ────────────────────────────────────────────────────    # Exclude from uncertain_dates anything that was already classified as a
-    # confident deadline — prevents the same date appearing in both sections.
+    # ── Build response ────────────────────────────────────────────────────    # Exclude from uncertain_dates anything already classified as a deadline,
+    # and deduplicate by normalised value.
     deadline_values = {d["value"].lower() for d in deadlines}
-    uncertain_dates = [
-        u for u in uncertain_dates
-        if u["value"].lower() not in deadline_values
-    ]
+    seen_uncertain: set[str] = set()
+    filtered_uncertain: list[dict] = []
+    for u in uncertain_dates:
+        key = u["value"].lower()
+        if key in deadline_values or key in seen_uncertain:
+            continue
+        seen_uncertain.add(key)
+        filtered_uncertain.append(u)
+    uncertain_dates = filtered_uncertain
 
     return respond(200, {
         "lines":           lines,
